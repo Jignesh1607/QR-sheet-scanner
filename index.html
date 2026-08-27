@@ -65,7 +65,7 @@
       <div id="previewContainer" class="bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-left text-xs space-y-1.5 overflow-y-auto max-h-44 mb-4"></div>
 
       <button id="saveBtn" onclick="saveAndSend()" class="w-full bg-gradient-to-r from-red-600 to-blue-800 hover:from-red-700 hover:to-blue-900 text-white font-bold py-3.5 px-4 rounded-xl transition shadow-lg text-sm">
-        Save Data + Image to Sheet ➔
+        Save Data to Sheet ➔
       </button>
     </div>
   </div>
@@ -104,8 +104,8 @@
   </section>
 
   <script>
-    // Paste your Web App URL here from Google Apps Script deployment
-    const GOOGLE_SHEET_WEBHOOK_URL = "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE";
+    // Live Web App URL from Google Apps Script deployment
+    const GOOGLE_SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyLt3Twu1c8dv0U4A6AwqYVXiSae9oZWthf4Wbh4c4A75fXApJMcI2B9AEXkoYhirrpjg/exec";
 
     let leads = JSON.parse(localStorage.getItem('supertron_qr_records')) || [];
     let pendingRecord = null;
@@ -220,27 +220,31 @@
     async function saveAndSend() {
       if (pendingRecord) {
         const btn = document.getElementById('saveBtn');
-        btn.innerText = "Uploading Photo & Syncing...";
+        btn.innerText = "Syncing to Sheet...";
         btn.disabled = true;
 
-        if (GOOGLE_SHEET_WEBHOOK_URL && GOOGLE_SHEET_WEBHOOK_URL !== "https://script.google.com/macros/s/AKfycbyLt3Twu1c8dv0U4A6AwqYVXiSae9oZWthf4Wbh4c4A75fXApJMcI2B9AEXkoYhirrpjg/exec") {
-          try {
-            await fetch(GOOGLE_SHEET_WEBHOOK_URL, {
-              method: 'POST',
-              mode: 'no-cors',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(pendingRecord)
-            });
-          } catch (e) {
-            console.error("Upload error:", e);
-          }
+        try {
+          const payload = { ...pendingRecord };
+          delete payload.imageData;
+
+          await fetch(GOOGLE_SHEET_WEBHOOK_URL, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(payload)
+          });
+
+          alert("Data successfully sent to Google Sheet!");
+        } catch (e) {
+          console.error("Upload error:", e);
+          alert("Failed to send data: " + e.message);
         }
 
         leads.unshift(pendingRecord);
         localStorage.setItem('supertron_qr_records', JSON.stringify(leads));
         renderLeads();
 
-        btn.innerText = "Save Data + Image to Sheet ➔";
+        btn.innerText = "Save Data to Sheet ➔";
         btn.disabled = false;
         pendingRecord = null;
       }
