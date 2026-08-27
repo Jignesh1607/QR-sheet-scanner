@@ -6,7 +6,7 @@
   <title>Supertron VAD - Universal QR Scanner & Lead Collector</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
-  <!-- jsQR library for manual image QR extraction -->
+  <!-- jsQR library for extracting QR data from manual photo snapshots -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <style>
     body { background: url('bg img.jpg') no-repeat center center fixed; background-size: cover; }
@@ -95,7 +95,6 @@
     let pendingRecord = null;
     let html5QrCode = null;
 
-    // Fetch synchronized count across all devices directly from Google Sheets
     async function syncGlobalCount() {
       try {
         const res = await fetch(GOOGLE_SHEET_WEBHOOK_URL);
@@ -203,7 +202,6 @@
       const capture = captureScannerCanvas();
       if (!capture.dataUrl) return;
 
-      // Extract QR code from manual frame using jsQR library
       let extractedText = null;
       if (capture.imageData && window.jsQR) {
         const code = jsQR(capture.imageData.data, capture.width, capture.height);
@@ -238,19 +236,57 @@
         btn.disabled = false;
         pendingRecord = null;
         
-        // Refresh total counter across all devices
         setTimeout(syncGlobalCount, 1500);
       }
       document.getElementById('confirmModal').classList.add('hidden');
       if (html5QrCode) html5QrCode.resume();
     }
 
+    // Hardware Auto-Focus Camera Setup
+    const cameraConfig = {
+      facingMode: "environment",
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      focusMode: { ideal: "continuous" }
+    };
+
     html5QrCode = new Html5Qrcode("reader");
-    html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 250, height: 250 } }, onScanSuccess);
+    html5QrCode.start(
+      cameraConfig, 
+      { 
+        fps: 15,
+        qrbox: function(viewfinderWidth, viewfinderHeight) {
+          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+          return {
+            width: Math.floor(minEdge * 0.75),
+            height: Math.floor(minEdge * 0.75)
+          };
+        }
+      }, 
+      onScanSuccess
+    ).then(() => {
+      // Force continuous hardware focus & slight zoom for blurry macro camera lenses
+      const track = html5QrCode.getRunningTrack();
+      const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+
+      let constraints = {};
+      if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+        constraints.focusMode = 'continuous';
+      }
+      if (capabilities.zoom) {
+        constraints.zoom = Math.min(1.2, capabilities.zoom.max || 1);
+      }
+
+      if (Object.keys(constraints).length > 0) {
+        track.applyConstraints({ advanced: [constraints] }).catch(err => console.log("Focus constraint fallback", err));
+      }
+    }).catch(err => {
+      console.error("Camera start error:", err);
+    });
 
     renderLeads();
     syncGlobalCount();
-    setInterval(syncGlobalCount, 10000); // Polling sync every 10 seconds across all devices
+    setInterval(syncGlobalCount, 10000);
   </script>
 </body>
 </html>
