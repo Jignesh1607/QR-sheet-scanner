@@ -65,7 +65,7 @@
       <div id="previewContainer" class="bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-left text-xs space-y-1.5 overflow-y-auto max-h-44 mb-4"></div>
 
       <button id="saveBtn" onclick="saveAndSend()" class="w-full bg-gradient-to-r from-red-600 to-blue-800 hover:from-red-700 hover:to-blue-900 text-white font-bold py-3.5 px-4 rounded-xl transition shadow-lg text-sm">
-        Save Data to Sheet ➔
+        Save Data + Image to Sheet ➔
       </button>
     </div>
   </div>
@@ -111,16 +111,19 @@
     let pendingRecord = null;
     let html5QrCode = null;
 
+    // Compressed Image Capture Function
     function captureScannerCanvas() {
       const videoElem = document.querySelector("#reader video");
       if (!videoElem) return null;
       
       const canvas = document.createElement("canvas");
-      canvas.width = videoElem.videoWidth || 300;
-      canvas.height = videoElem.videoHeight || 300;
+      canvas.width = 320;
+      canvas.height = 240;
+      
       const ctx = canvas.getContext("2d");
       ctx.drawImage(videoElem, 0, 0, canvas.width, canvas.height);
-      return canvas.toDataURL("image/png");
+      
+      return canvas.toDataURL("image/jpeg", 0.6);
     }
 
     function decodePayload(rawText) {
@@ -220,31 +223,25 @@
     async function saveAndSend() {
       if (pendingRecord) {
         const btn = document.getElementById('saveBtn');
-        btn.innerText = "Syncing to Sheet...";
+        btn.innerText = "Syncing Data & Photo...";
         btn.disabled = true;
 
         try {
-          const payload = { ...pendingRecord };
-          delete payload.imageData;
-
           await fetch(GOOGLE_SHEET_WEBHOOK_URL, {
             method: 'POST',
             mode: 'no-cors',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(pendingRecord)
           });
-
-          alert("Data successfully sent to Google Sheet!");
         } catch (e) {
           console.error("Upload error:", e);
-          alert("Failed to send data: " + e.message);
         }
 
         leads.unshift(pendingRecord);
         localStorage.setItem('supertron_qr_records', JSON.stringify(leads));
         renderLeads();
 
-        btn.innerText = "Save Data to Sheet ➔";
+        btn.innerText = "Save Data + Image to Sheet ➔";
         btn.disabled = false;
         pendingRecord = null;
       }
