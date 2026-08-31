@@ -110,19 +110,21 @@
 </div>
 
 <script>
-  // IMPORTANT: replace this with the /exec URL of the Apps Script below.
+  // Google Apps Script Web App. Replace with your latest /exec deployment URL.
   const CONFIG = {
     WEBHOOK_URL: "https://script.google.com/macros/s/AKfycbyPv718_Xptf7ZmrIDNzDI0yIwAJG4AAB-P78oV_OmKg4dlICYLiEE_ZRC9L5YMmLRP0A/exec",
     SHEET_URL: "https://docs.google.com/spreadsheets/d/1d88LuC4XpylVjnfO-WrQ7r2LdRaSNy7VyvT9YvStPnQ/edit"
   };
 
-  const STORAGE_KEY = "supertron_qr_records_v2";
+  const STORAGE_KEY = "supertron_qr_records_v3";
   const MAX_LOCAL_RECORDS = 30;
+
   let records = safeRead();
-  let scanner = null;
+  let stream = null;
   let cameraRunning = false;
-  let pendingRecord = null;
+  let scanTimer = null;
   let autoScanLock = false;
+  let pendingRecord = null;
 
   const $ = id => document.getElementById(id);
 
@@ -130,13 +132,16 @@
     try {
       const v = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
       return Array.isArray(v) ? v : [];
-    } catch (_) { return []; }
+    } catch (_) {
+      return [];
+    }
   }
 
-  function setStatus(text, type="info") {
+  function setStatus(text, type = "info") {
     const el = $("status");
     el.textContent = text;
-    el.className = "mb-4 rounded-xl px-4 py-3 text-sm font-semibold " +
+    el.className =
+      "mb-4 rounded-xl px-4 py-3 text-sm font-semibold " +
       (type === "success" ? "bg-green-50 text-green-800" :
        type === "error" ? "bg-red-50 text-red-800" :
        type === "warn" ? "bg-amber-50 text-amber-800" :
@@ -145,26 +150,34 @@
 
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, c => ({
-      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
     }[c]));
   }
 
   function first(obj, keys) {
     for (const key of keys) {
-      if (obj && obj[key] != null && String(obj[key]).trim() !== "") return String(obj[key]).trim();
+      if (obj && obj[key] != null && String(obj[key]).trim() !== "") {
+        return String(obj[key]).trim();
+      }
     }
     return "";
   }
 
   function parseVCard(text) {
     const out = {};
-    const unfolded = text.replace(/\r\n[ \t]/g, "").replace(/\r/g, "").split("\n");
+    const unfolded = text
+      .replace(/\r\n[ \t]/g, "")
+      .replace(/\r/g, "")
+      .split("\n");
+
     for (const line of unfolded) {
       const idx = line.indexOf(":");
       if (idx < 0) continue;
+
       const left = line.slice(0, idx).trim();
       const value = line.slice(idx + 1).trim();
       const key = left.split(";")[0].toUpperCase();
+
       if (key === "FN") out.name = value;
       else if (key === "N" && !out.name) out.name = value.replace(/;/g, " ");
       else if (key === "ORG") out.company = value.replace(/;/g, " / ");
@@ -178,7 +191,10 @@
 
   function parsePayload(raw) {
     const text = String(raw || "").trim();
-    const base = { timestamp: new Date().toISOString(), rawPayload: text };
+    const base = {
+      timestamp: new Date().toISOString(),
+      rawPayload: text
+    };
 
     if (!text) return base;
 
@@ -193,24 +209,24 @@
           base.content = text;
         }
       } catch (_) {
-        const parts = text.split(/\s*[|]\s*/);
+        const parts = text.split(/\s*\|\s*/);
         if (parts.length > 1) {
           base.name = parts[0] || "";
           base.company = parts[1] || "";
           base.badgeId = parts[2] || "";
           base.email = parts[3] || "";
         } else if (text.includes("\t")) {
-          const parts2 = text.split(/\t+/);
-          base.name = parts2[0] || "";
-          base.company = parts2[1] || "";
-          base.badgeId = parts2[2] || "";
-          base.email = parts2[3] || "";
+          const p = text.split(/\t+/);
+          base.name = p[0] || "";
+          base.company = p[1] || "";
+          base.badgeId = p[2] || "";
+          base.email = p[3] || "";
         } else if (text.includes(",")) {
-          const parts3 = text.split(/\s*,\s*/);
-          base.name = parts3[0] || "";
-          base.company = parts3[1] || "";
-          base.badgeId = parts3[2] || "";
-          base.email = parts3[3] || "";
+          const p = text.split(/\s*,\s*/);
+          base.name = p[0] || "";
+          base.company = p[1] || "";
+          base.badgeId = p[2] || "";
+          base.email = p[3] || "";
         } else {
           base.content = text;
         }
@@ -221,160 +237,330 @@
     base.company = first(base, ["company","Company / Org","companyName","organization","org","Company"]);
     base.badgeId = first(base, ["badgeId","Badge ID / Notes","badge_id","badge","id","uid","Badge ID"]);
     base.email = first(base, ["email","Email","emailAddress"]);
+
     return base;
   }
 
-  function captureFrame() {
-    const video = document.querySelector("#reader video");
-    if (!video || video.readyState < 2 || !video.videoWidth) return null;
-
-    // Limit upload size while keeping enough detail for a QR/event badge photo.
-    const maxWidth = 1280;
-    const scale = Math.min(1, maxWidth / video.videoWidth);
-    const w = Math.max(1, Math.round(video.videoWidth * scale));
-    const h = Math.max(1, Math.round(video.videoHeight * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = w; canvas.height = h;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(video, 0, 0, w, h);
-    return {
-      dataUrl: canvas.toDataURL("image/jpeg", 0.62),
-      imageData: ctx.getImageData(0, 0, w, h)
-    };
+  function getVideo() {
+    return $("cameraVideo");
   }
 
-  function showPreview(record, dataUrl, hasQr) {
-    pendingRecord = { ...record, imageData: dataUrl, hasQr: !!hasQr };
-    $("qrPhotoPreview").src = dataUrl;
-    $("modalTitle").textContent = hasQr ? "QR decoded & snapshot captured" : "Snapshot captured";
-    $("modalSub").textContent = hasQr ? "Review the decoded fields before saving." : "No QR was decoded. The snapshot will not be saved as a lead.";
-    $("modalError").classList.add("hidden");
-    $("previewContainer").innerHTML = Object.entries(record)
-      .filter(([k]) => k !== "rawPayload" && k !== "timestamp")
-      .map(([k,v]) => `<div><span class="font-bold uppercase text-gray-500">${escapeHtml(k)}:</span> ${escapeHtml(v)}</div>`)
-      .join("") + `<div><span class="font-bold uppercase text-gray-500">Raw Payload:</span> ${escapeHtml(record.rawPayload || "")}</div>`;
-    $("saveBtn").disabled = !hasQr;
-    $("saveBtn").textContent = hasQr ? "Save Data + Image to Sheet" : "No QR — Close";
-    $("confirmModal").classList.remove("hidden");
-    $("confirmModal").classList.add("flex");
-  }
+  function ensureVideoElement() {
+    let video = getVideo();
 
-  function closeModal() {
-    $("confirmModal").classList.add("hidden");
-    $("confirmModal").classList.remove("flex");
-    pendingRecord = null;
-    if (cameraRunning && scanner) {
-      try { scanner.resume(); } catch (_) {}
+    if (!video) {
+      $("reader").innerHTML = `
+        <video id="cameraVideo"
+          autoplay
+          muted
+          playsinline
+          webkit-playsinline
+          style="width:100%;height:auto;display:block;background:#000;min-height:260px;object-fit:cover;">
+        </video>
+      `;
+      video = getVideo();
     }
+
+    return video;
   }
 
   async function startCamera() {
-    if (cameraRunning) {
-      captureNow();
+    // IMPORTANT:
+    // This function is called directly by a user click.
+    // It uses the browser's native getUserMedia instead of html5-qrcode's
+    // start/transition state machine. This removes the "already under transition"
+    // failure seen in the previous version.
+    if (cameraRunning && stream) {
+      setStatus("Camera is already live. Tap Freeze & Capture.", "success");
+      return;
+    }
+
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      setStatus(
+        "Camera requires HTTPS. Open the GitHub Pages HTTPS URL and try again.",
+        "error"
+      );
       return;
     }
 
     $("cameraBtn").disabled = true;
-    setStatus("Requesting camera access…", "info");
+    $("retryBtn").classList.add("hidden");
+    setStatus("Requesting camera permission…", "info");
 
     try {
-      scanner = new Html5Qrcode("reader", { verbose: false });
-      const config = {
-        fps: 12,
-        qrbox: (vw, vh) => {
-          const edge = Math.floor(Math.min(vw, vh) * 0.72);
-          return { width: edge, height: edge };
-        },
-        aspectRatio: 1.7777778
+      // Do NOT call getCameras() first.
+      // getUserMedia is the permission-triggering call and is made directly
+      // from the button click.
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
       };
 
-      try {
-        await scanner.start({ facingMode: { ideal: "environment" } }, config, onAutoScan, onScanFailure);
-      } catch (firstError) {
-        // Some desktop browsers need a concrete camera ID.
-        const cameras = await Html5Qrcode.getCameras();
-        if (!cameras.length) throw firstError;
-        await scanner.start(cameras[0].id, config, onAutoScan, onScanFailure);
-      }
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      const video = ensureVideoElement();
+      video.srcObject = stream;
+      await video.play();
 
       cameraRunning = true;
-      $("cameraBtn").textContent = "📷 Capture / Freeze";
+      autoScanLock = false;
+
+      $("cameraBtn").disabled = false;
+      $("cameraBtn").textContent = "📷 Camera Live";
       $("captureBtn").disabled = false;
       $("retryBtn").classList.add("hidden");
-      setStatus("Camera is live. Align the QR inside the frame, or tap Capture / Freeze.", "success");
-      applyCameraControls();
+
+      setStatus(
+        "Camera is live. Align the QR inside the frame or tap Freeze & Capture.",
+        "success"
+      );
+
+      await applyNativeCameraControls();
+      startScanLoop();
+
     } catch (err) {
-      console.error(err);
+      console.error("NATIVE CAMERA ERROR:", err);
+
       cameraRunning = false;
+      stopCameraStream();
+
       $("cameraBtn").disabled = false;
       $("captureBtn").disabled = true;
       $("retryBtn").classList.remove("hidden");
+
       setStatus(cameraErrorMessage(err), "error");
     }
   }
 
   function cameraErrorMessage(err) {
     const name = err?.name || "";
-    if (name === "NotAllowedError" || /permission|denied/i.test(String(err))) {
-      return "Camera permission was denied. Allow Camera for this site in your browser settings, then tap Retry Camera.";
+    const message = String(err?.message || err || "");
+
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      return "Camera permission is blocked for this site. Allow Camera in browser/site settings, reload the page, then tap Start Camera.";
     }
-    if (/secure context|https/i.test(String(err)) || !window.isSecureContext) {
-      return "Camera requires HTTPS (or localhost). Open the GitHub Pages HTTPS URL, not a local file.";
+
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      return "No camera was found. Check that the device has a working camera.";
     }
-    if (name === "NotFoundError") return "No camera was found on this device.";
-    return "Could not start the camera. Check that no other app/browser tab is using it, then tap Retry.";
+
+    if (name === "NotReadableError" || name === "TrackStartError") {
+      return "The camera is already being used by another app or browser tab. Close that camera use and tap Retry.";
+    }
+
+    if (name === "OverconstrainedError") {
+      return "The requested camera settings are not supported. Tap Retry; the scanner will use a simpler camera configuration.";
+    }
+
+    if (!window.isSecureContext || /secure context|https/i.test(message)) {
+      return "Camera access requires HTTPS (or localhost). Use the HTTPS GitHub Pages address.";
+    }
+
+    return `Could not start the camera (${name || "unknown error"}). ${message || "Check browser camera permissions and tap Retry."}`;
   }
 
-  async function applyCameraControls() {
+  async function applyNativeCameraControls() {
     try {
-      const track = scanner?.getRunningTrack?.();
+      const track = stream?.getVideoTracks?.()[0];
       if (!track) return;
+
       const caps = track.getCapabilities ? track.getCapabilities() : {};
       const advanced = {};
-      if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) advanced.focusMode = "continuous";
-      if (caps.zoom) advanced.zoom = Math.min(1.2, Number(caps.zoom.max || 1));
-      if (Object.keys(advanced).length) await track.applyConstraints({ advanced: [advanced] });
+
+      if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+        advanced.focusMode = "continuous";
+      }
+
+      if (caps.zoom && Number.isFinite(caps.zoom.max)) {
+        advanced.zoom = Math.min(1.2, caps.zoom.max);
+      }
+
+      if (Object.keys(advanced).length) {
+        await track.applyConstraints({ advanced: [advanced] });
+      }
     } catch (e) {
-      console.debug("Optional camera controls unavailable", e);
+      console.debug("Optional focus/zoom controls unavailable:", e);
     }
   }
 
-  function onScanFailure() {}
+  function startScanLoop() {
+    stopScanLoop();
 
-  function onAutoScan(decodedText) {
-    if (autoScanLock || !cameraRunning) return;
-    autoScanLock = true;
-    const frame = captureFrame();
-    if (!frame) { autoScanLock = false; return; }
-    try { scanner.pause(true); } catch (_) {}
-    showPreview(parsePayload(decodedText), frame.dataUrl, true);
+    scanTimer = setInterval(() => {
+      if (!cameraRunning || autoScanLock) return;
+
+      const frame = captureFrame();
+      if (!frame) return;
+
+      try {
+        const code = window.jsQR?.(
+          frame.imageData.data,
+          frame.imageData.width,
+          frame.imageData.height,
+          { inversionAttempts: "attemptBoth" }
+        );
+
+        if (code?.data) {
+          autoScanLock = true;
+          showPreview(parsePayload(code.data), frame.dataUrl, true);
+        }
+      } catch (e) {
+        console.debug("Auto QR decode error:", e);
+      }
+    }, 180);
+  }
+
+  function stopScanLoop() {
+    if (scanTimer) {
+      clearInterval(scanTimer);
+      scanTimer = null;
+    }
+  }
+
+  function captureFrame() {
+    const video = getVideo();
+
+    if (!video || !cameraRunning || video.readyState < 2 ||
+        !video.videoWidth || !video.videoHeight) {
+      return null;
+    }
+
+    // Keep the frame manageable for Drive upload while preserving enough
+    // resolution for QR decoding.
+    const maxWidth = 1600;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    const w = Math.max(1, Math.round(video.videoWidth * scale));
+    const h = Math.max(1, Math.round(video.videoHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, w, h);
+
+    return {
+      dataUrl: canvas.toDataURL("image/jpeg", 0.68),
+      imageData: ctx.getImageData(0, 0, w, h)
+    };
+  }
+
+  function showPreview(record, dataUrl, hasQr) {
+    pendingRecord = {
+      ...record,
+      imageData: dataUrl,
+      hasQr: !!hasQr
+    };
+
+    $("qrPhotoPreview").src = dataUrl;
+    $("modalTitle").textContent =
+      hasQr ? "QR decoded & snapshot captured" : "Snapshot captured";
+    $("modalSub").textContent =
+      hasQr
+        ? "Review the decoded fields before saving."
+        : "No QR was decoded. This snapshot cannot be saved as a lead.";
+
+    $("modalError").classList.add("hidden");
+
+    const fields = Object.entries(record)
+      .filter(([k]) => k !== "rawPayload" && k !== "timestamp")
+      .map(([k, v]) =>
+        `<div><span class="font-bold uppercase text-gray-500">${escapeHtml(k)}:</span> ${escapeHtml(v)}</div>`
+      )
+      .join("");
+
+    $("previewContainer").innerHTML =
+      fields +
+      `<div><span class="font-bold uppercase text-gray-500">Raw Payload:</span> ${escapeHtml(record.rawPayload || "")}</div>`;
+
+    $("saveBtn").disabled = !hasQr;
+    $("saveBtn").textContent = hasQr
+      ? "Save Data + Image to Sheet"
+      : "No QR — Close";
+
+    $("confirmModal").classList.remove("hidden");
+    $("confirmModal").classList.add("flex");
+
+    // Stop continuous decoding while the user reviews the record.
+    stopScanLoop();
   }
 
   function captureNow() {
-    if (!cameraRunning) return startCamera();
+    if (!cameraRunning) {
+      startCamera();
+      return;
+    }
 
     const frame = captureFrame();
+
     if (!frame) {
-      setStatus("Camera frame is not ready yet. Wait one second and try again.", "warn");
+      setStatus("Camera frame is not ready yet. Wait a moment and try again.", "warn");
       return;
     }
 
     let decoded = null;
+
     try {
-      const code = window.jsQR(frame.imageData.data, frame.imageData.width, frame.imageData.height, {
-        inversionAttempts: "attemptBoth"
-      });
+      const code = window.jsQR?.(
+        frame.imageData.data,
+        frame.imageData.width,
+        frame.imageData.height,
+        { inversionAttempts: "attemptBoth" }
+      );
+
       if (code?.data) decoded = code.data;
     } catch (e) {
-      console.error("Manual QR decode failed", e);
+      console.error("Manual QR decode failed:", e);
     }
 
+    autoScanLock = true;
+
     if (decoded) {
-      try { scanner.pause(true); } catch (_) {}
       showPreview(parsePayload(decoded), frame.dataUrl, true);
     } else {
-      try { scanner.pause(true); } catch (_) {}
       showPreview(parsePayload(""), frame.dataUrl, false);
+    }
+  }
+
+  function closeModal() {
+    $("confirmModal").classList.add("hidden");
+    $("confirmModal").classList.remove("flex");
+
+    pendingRecord = null;
+    autoScanLock = false;
+
+    if (cameraRunning) {
+      startScanLoop();
+      setStatus(
+        "Camera is live. Align the next QR or tap Freeze & Capture.",
+        "success"
+      );
+    }
+  }
+
+  function stopCameraStream() {
+    stopScanLoop();
+
+    if (stream) {
+      stream.getTracks().forEach(track => {
+        try { track.stop(); } catch (_) {}
+      });
+    }
+
+    stream = null;
+    cameraRunning = false;
+    autoScanLock = false;
+
+    const video = getVideo();
+    if (video) {
+      try {
+        video.pause();
+        video.srcObject = null;
+      } catch (_) {}
     }
   }
 
@@ -386,8 +572,9 @@
     btn.textContent = "Uploading photo + data…";
     $("modalError").classList.add("hidden");
 
-    const clientId = crypto.randomUUID ? crypto.randomUUID() :
-      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const clientId =
+      (crypto.randomUUID ? crypto.randomUUID() :
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
     const payload = {
       clientId,
@@ -401,8 +588,9 @@
     };
 
     try {
-      // URLSearchParams keeps this a simple cross-origin request, avoiding a CORS preflight.
-      const body = new URLSearchParams({ payload: JSON.stringify(payload) });
+      const body = new URLSearchParams({
+        payload: JSON.stringify(payload)
+      });
 
       await fetch(CONFIG.WEBHOOK_URL, {
         method: "POST",
@@ -410,8 +598,13 @@
         body
       });
 
-      const saved = await waitForSave(clientId, 15000);
-      if (!saved) throw new Error("The server did not confirm the save within 15 seconds.");
+      const saved = await waitForSave(clientId, 20000);
+
+      if (!saved) {
+        throw new Error(
+          "Google Apps Script did not confirm the save within 20 seconds."
+        );
+      }
 
       const local = {
         timestamp: payload.timestamp,
@@ -421,48 +614,77 @@
         email: payload.email,
         photoUrl: saved.photoUrl || ""
       };
+
       records.unshift(local);
       records = records.slice(0, MAX_LOCAL_RECORDS);
+
       localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
       renderRecords();
       await syncGlobalCount();
 
       $("modalTitle").textContent = "Saved successfully";
-      $("modalSub").textContent = saved.photoUrl ? "Data is in the Sheet and the photo is in Drive." : "Data is in the Sheet.";
+      $("modalSub").textContent = saved.photoUrl
+        ? "Data is in Google Sheets and the photo is in Google Drive."
+        : "Data is in Google Sheets.";
       $("modalIcon").textContent = "✓";
-      $("modalError").classList.add("hidden");
       btn.textContent = "Saved ✓";
+
       setStatus("Lead saved to Google Sheets + Drive.", "success");
 
       setTimeout(closeModal, 900);
+
     } catch (err) {
-      console.error(err);
-      $("modalError").textContent = `Save failed: ${err.message}. Nothing was added to local history.`;
+      console.error("SAVE ERROR:", err);
+
+      $("modalError").textContent =
+        `Save failed: ${err.message}. Nothing was added to local history.`;
       $("modalError").classList.remove("hidden");
+
       btn.disabled = false;
       btn.textContent = "Retry Save";
-      setStatus("Save failed. Check the Apps Script deployment and try again.", "error");
+
+      setStatus(
+        "Save failed. Check the Apps Script deployment and permissions.",
+        "error"
+      );
     }
   }
 
   async function waitForSave(clientId, timeoutMs) {
     const start = Date.now();
+
     while (Date.now() - start < timeoutMs) {
       try {
-        const res = await fetch(`${CONFIG.WEBHOOK_URL}?action=check&clientId=${encodeURIComponent(clientId)}&t=${Date.now()}`, { cache: "no-store" });
+        const res = await fetch(
+          `${CONFIG.WEBHOOK_URL}?action=check&clientId=${encodeURIComponent(clientId)}&t=${Date.now()}`,
+          { cache: "no-store" }
+        );
+
         const data = await res.json();
+
         if (data.ok) return data;
-      } catch (_) {}
-      await new Promise(r => setTimeout(r, 900));
+      } catch (_) {
+        // Keep polling; a temporary response failure should not create a duplicate.
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 900));
     }
+
     return null;
   }
 
   async function syncGlobalCount() {
     try {
-      const res = await fetch(`${CONFIG.WEBHOOK_URL}?action=count&t=${Date.now()}`, { cache: "no-store" });
+      const res = await fetch(
+        `${CONFIG.WEBHOOK_URL}?action=count&t=${Date.now()}`,
+        { cache: "no-store" }
+      );
+
       const data = await res.json();
-      if (typeof data.count === "number") $("leadCount").textContent = data.count;
+
+      if (typeof data.count === "number") {
+        $("leadCount").textContent = data.count;
+      }
     } catch (_) {
       $("leadCount").textContent = "—";
     }
@@ -471,33 +693,47 @@
   function renderRecords() {
     const tbody = $("leadTable");
     tbody.textContent = "";
+
     records.forEach((r, i) => {
       const tr = document.createElement("tr");
       tr.className = "hover:bg-white/60";
+
       const values = [
-        i + 1, r.name || "N/A", r.company || "N/A", r.badgeId || "N/A",
-        r.email || "N/A", new Date(r.timestamp).toLocaleString()
+        i + 1,
+        r.name || "N/A",
+        r.company || "N/A",
+        r.badgeId || "N/A",
+        r.email || "N/A",
+        r.timestamp ? new Date(r.timestamp).toLocaleString() : "N/A"
       ];
+
       values.forEach((v, idx) => {
         const td = document.createElement("td");
-        td.className = "p-3 " + (idx === 0 ? "font-medium text-gray-900" : "");
+        td.className =
+          "p-3 " + (idx === 0 ? "font-medium text-gray-900" : "");
         td.textContent = v;
         tr.appendChild(td);
       });
+
       tbody.appendChild(tr);
     });
   }
 
+  // Direct user actions only.
+  // No camera call occurs during page load.
   $("cameraBtn").addEventListener("click", startCamera);
   $("captureBtn").addEventListener("click", captureNow);
-  $("retryBtn").addEventListener("click", () => { $("cameraBtn").disabled = false; startCamera(); });
+
+  $("retryBtn").addEventListener("click", () => {
+    $("cameraBtn").disabled = false;
+    startCamera();
+  });
+
   $("cancelBtn").addEventListener("click", closeModal);
   $("saveBtn").addEventListener("click", saveAndSend);
 
   window.addEventListener("beforeunload", () => {
-    if (scanner && cameraRunning) {
-      try { scanner.stop(); } catch (_) {}
-    }
+    stopCameraStream();
   });
 
   renderRecords();
